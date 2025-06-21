@@ -9,7 +9,7 @@ from starlette.status import HTTP_302_FOUND
 import requests
 from app.models import Order, CartItem
 from app.database import SessionLocal
-from starlette.status import HTTP_302_FOUND
+from starlette.status import HTTP_302_FOUND,HTTP_401_UNAUTHORIZED
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -27,22 +27,6 @@ def get_db():
     finally:
         db.close()
 
-# Token validation
-def get_current_user(token: HTTPAuthorizationCredentials = Security(security)):
-    if not token or not token.credentials:
-        raise HTTPException(status_code=403, detail="Invalid token")
-
-    try:
-        payload = jwt.decode(token.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-        exp = payload.get("exp")
-        if exp is None or datetime.utcfromtimestamp(exp) < datetime.utcnow():
-            raise HTTPException(status_code=401, detail="Token expired")
-        return payload
-    except ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except JWTError:
-        raise HTTPException(status_code=403, detail="Invalid token")
-
 import os
 
 PRODUCT_SERVICE_URL = os.environ.get("PRODUCT_SERVICE_URL", "http://localhost:8000/products")
@@ -55,10 +39,21 @@ def create_order(
     db: Session = Depends(get_db),
     token: HTTPAuthorizationCredentials = Security(security)
 ):
-    
+    userService_url="http://user-service:8000/users/me"
     headers = {
         "Authorization": f"Bearer {token.credentials}"
     }
+    response = requests.post(userService_url, headers=headers)
+    if response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+
+    user_data = response.json()
+    if user_data["id"] != user_id:
+        raise HTTPException(
+        status_code=401,
+        detail="Invalid authentication credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     # Fetch product info
     product_resp = requests.get(f"{PRODUCT_SERVICE_URL}/{product_id}",headers=headers)
     if product_resp.status_code != 200:
@@ -83,7 +78,6 @@ def create_order(
     db.add(new_order)
     db.commit()
     db.refresh(new_order)
-
     return {"message": "Order created", "order_id": new_order.id}
 
 @router.post("/cart")
@@ -129,8 +123,24 @@ def get_cart_items(user_id: int, db: Session = Depends(get_db)):
 @router.post("/cart/checkout")
 def checkout_cart(
     user_id: int = Form(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    token: HTTPAuthorizationCredentials = Security(security)
 ):
+    userService_url="http://user-service:8000/users/me"
+    headers = {
+        "Authorization": f"Bearer {token.credentials}"
+    }
+    response = requests.post(userService_url, headers=headers)
+    if response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+
+    user_data = response.json()
+    if user_data["id"] != user_id:
+        raise HTTPException(
+        status_code=401,
+        detail="Invalid authentication credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     items = db.query(CartItem).filter(CartItem.user_id == user_id).all()
     if not items:
         return {"message": "Cart is empty"}
@@ -154,7 +164,7 @@ def remove_item(
 ):
     db.query(CartItem).filter(CartItem.id == cart_item_id).delete()
     db.commit()
-    return RedirectResponse(url=f"/cart?user_id={user_id}", status_code=HTTP_302_FOUND)
+    return {"message": "Removed successfully"}
 
 from fastapi import Body
 
